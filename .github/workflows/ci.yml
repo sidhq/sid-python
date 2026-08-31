@@ -61,4 +61,5 @@ jobs:
       - run: python scripts/check_artifacts.py dist
       - run: uv venv clean-venv
       - run: uv pip install --python clean-venv/bin/python dist/*.tar.gz
-      - run: clean-venv/bin/python -c "import sid; from sid.document_cache import bm25_snippet_with_stride; assert bm25_snippet_with_stride('b', 'a b c') == (0, 5)"
+      - working-directory: clean-venv
+        run: bin/python -c "import sid; from sid.document_cache import bm25_snippet_with_stride; assert bm25_snippet_with_stride('b', 'a b c') == (0, 5)"
