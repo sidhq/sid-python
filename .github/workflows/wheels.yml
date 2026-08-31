@@ -20,6 +20,7 @@ jobs:
     name: ${{ matrix.platform }} ${{ matrix.target }}
     runs-on: ${{ matrix.platform }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: macos-15
@@ -52,12 +53,25 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           command: build
           args: --release --locked --compatibility pypi --out dist
-      - shell: bash
+      - name: Create wheel smoke-test environment
+        run: python -m venv wheel-venv
+      - name: Test wheel on POSIX
+        if: runner.os != 'Windows'
+        working-directory: wheel-venv
+        shell: bash
         run: |
-          python -m venv wheel-venv
-          wheel-venv/bin/python -m pip install dist/*.whl || wheel-venv/Scripts/python -m pip install dist/*.whl
-          wheel-venv/bin/python -c "import sid; import sid._snippet" || wheel-venv/Scripts/python -c "import sid; import sid._snippet"
-          wheel-venv/bin/python -m pip check || wheel-venv/Scripts/python -m pip check
+          bin/python -m pip install ../dist/*.whl
+          bin/python -c "import sid; import sid._snippet"
+          bin/python -m pip check
+      - name: Test wheel on Windows
+        if: runner.os == 'Windows'
+        working-directory: wheel-venv
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem ../dist/*.whl).FullName
+          .\Scripts\python.exe -m pip install $wheel
+          .\Scripts\python.exe -c "import sid; import sid._snippet"
+          .\Scripts\python.exe -m pip check
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.platform }}-${{ matrix.target }}
