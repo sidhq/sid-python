@@ -42,8 +42,8 @@ jobs:
           - platform: windows-latest
             target: x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -83,7 +83,7 @@ jobs:
           .\Scripts\python.exe -m pip install $wheel
           .\Scripts\python.exe -c "import sid; import sid._snippet"
           .\Scripts\python.exe -m pip check
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.platform }}-${{ matrix.target }}
           path: dist/*.whl
@@ -102,11 +102,11 @@ jobs:
           - ubuntu:24.04
           - ubuntu:26.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: wheel-ubuntu-latest-x86_64
           path: dist
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
         with:
           python-version: "3.12"
       - run: uv venv wheel-venv
