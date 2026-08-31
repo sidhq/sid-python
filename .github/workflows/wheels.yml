@@ -54,15 +54,26 @@ jobs:
           command: build
           args: --release --locked --compatibility pypi --out dist
       - name: Create wheel smoke-test environment
+        if: ${{ !contains(matrix.target, 'musl') }}
         run: python -m venv wheel-venv
       - name: Test wheel on POSIX
-        if: runner.os != 'Windows'
+        if: ${{ runner.os != 'Windows' && !contains(matrix.target, 'musl') }}
         working-directory: wheel-venv
         shell: bash
         run: |
           bin/python -m pip install ../dist/*.whl
           bin/python -c "import sid; import sid._snippet"
           bin/python -m pip check
+      - name: Test musllinux wheel on Alpine
+        if: ${{ contains(matrix.target, 'musl') }}
+        shell: bash
+        run: |
+          docker run --rm --volume "${{ github.workspace }}/dist:/dist:ro" python:3.12-alpine sh -c '
+            python -m venv /tmp/wheel-venv &&
+            /tmp/wheel-venv/bin/python -m pip install /dist/*.whl &&
+            /tmp/wheel-venv/bin/python -c "import sid; import sid._snippet" &&
+            /tmp/wheel-venv/bin/python -m pip check
+          '
       - name: Test wheel on Windows
         if: runner.os == 'Windows'
         working-directory: wheel-venv
