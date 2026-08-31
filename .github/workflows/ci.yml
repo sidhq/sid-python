@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: ["1.88.0", stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - run: cargo +${{ matrix.toolchain }} test --locked
+      - run: cargo +${{ matrix.toolchain }} clippy --locked --all-targets -- -D warnings
+      - if: matrix.toolchain == 'stable'
+        run: cargo +stable fmt --all --check
+
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --group dev
+      - run: uv run maturin develop --locked
+      - run: uv run pytest -rxX --strict-markers --junitxml=pytest-report.xml
+      - run: uv run python scripts/check_pytest_report.py pytest-report.xml
+
+  sdist:
+    name: Source distribution on Rust 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uvx maturin==1.15.0 sdist --out dist
+      - run: uvx maturin==1.15.0 build --release --locked --compatibility pypi --out dist
+      - run: python scripts/check_artifacts.py dist
+      - run: uv venv clean-venv
+      - run: uv pip install --python clean-venv/bin/python dist/*.tar.gz
+      - run: clean-venv/bin/python -c "import sid; from sid.document_cache import bm25_snippet_with_stride; assert bm25_snippet_with_stride('b', 'a b c') == (0, 5)"

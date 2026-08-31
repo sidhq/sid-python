@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+pytest-report.xml
+.coverage
+.ruff_cache/
+.venv/
+target/
+dist/
+*.so
+*.pyd
+*.dylib
+*.egg-info/
+.env
+.env.*
+!.env.example

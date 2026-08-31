@@ -1,0 +1,55 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sid-sdk"
+version = "0.1.0"
+description = "Context-management primitives for rendering search results and tracking document spans shown to language models"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "SID" }]
+keywords = ["context-management", "retrieval", "search", "snippets", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/sidhq/sid-python"
+Repository = "https://github.com/sidhq/sid-python"
+Documentation = "https://github.com/sidhq/sid-python#readme"
+Issues = "https://github.com/sidhq/sid-python/issues"
+
+[dependency-groups]
+dev = [
+    "build>=1.3.0",
+    "cyclonedx-bom>=7.0.0",
+    "maturin>=1.9,<2.0",
+    "pytest>=9.1.1",
+    "twine>=6.2.0",
+]
+
+[tool.maturin]
+python-source = "."
+module-name = "sid._snippet"
+bindings = "pyo3"
+features = ["pyo3/extension-module"]
+include = [
+    { path = "sid/_snippet.pyi", format = ["sdist", "wheel"] },
+    { path = "sid/py.typed", format = ["sdist", "wheel"] },
+    { path = "THIRD_PARTY_NOTICES.md", format = ["sdist", "wheel"] },
+]
+
+[tool.pytest.ini_options]
+strict_markers = true

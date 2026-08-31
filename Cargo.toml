@@ -1,0 +1,33 @@
+[package]
+name = "sid-snippet"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Native snippet selection for the SID Python SDK"
+license = "MIT"
+homepage = "https://github.com/sidhq/sid-python"
+repository = "https://github.com/sidhq/sid-python"
+documentation = "https://github.com/sidhq/sid-python#readme"
+publish = false
+exclude = [
+    "/.env",
+    "/.env.*",
+    "/.github/**",
+    "/.venv/**",
+    "/dist/**",
+    "/target/**",
+    "**/__pycache__/**",
+]
+
+[lib]
+name = "_snippet"
+crate-type = ["cdylib"]
+
+[dependencies]
+alyze = "=0.1.5"
+pyo3 = { version = "=0.29.2", features = ["abi3-py312", "extension-module"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

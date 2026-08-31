@@ -1,0 +1,26 @@
+[
+  {
+    "name": "controlled phrase versus scattered terms",
+    "query": "contingent fee agreement",
+    "content": "contingent filler filler fee filler filler agreement pad pad pad contingent fee agreement tail tail tail",
+    "window_size": 6,
+    "stride": 2,
+    "expected_text": "contingent fee agreement"
+  },
+  {
+    "name": "legal contingent fee calculation",
+    "query": "expenses deducted before or after contingent fee calculated",
+    "content": "Background procedural facts occupy this opening passage and do not discuss the disputed terms. Additional unrelated history appears here. Further, the hearing judge determined that Mr. Sanderson violated the provision through his failure to provide Ms. Ozel with adequate information regarding the expenses associated with the representation, whether such expenses would be deducted before or after the contingent fee is calculated, and by failing to document the agreement.",
+    "window_size": 24,
+    "stride": 5,
+    "expected_text": "expenses would be deducted before or after the contingent fee is calculated"
+  },
+  {
+    "name": "legal fee agreement recommendation",
+    "query": "fee agreement contingent recommendation reasonable settlement offer",
+    "content": "The record begins with unrelated scheduling and jurisdictional matters. We agree with the Panel's conclusion that the fee under the Fee Agreement was not contingent on the outcome of the case, but rather, it was contingent on the Attorney's recommendation of a settlement offer which he deemed reasonable. The remaining section addresses sanctions.",
+    "window_size": 25,
+    "stride": 5,
+    "expected_text": "contingent on the Attorney's recommendation of a settlement offer"
+  }
+]

@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: Build ${{ matrix.platform }} ${{ matrix.target }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      matrix:
+        include:
+          - platform: macos-15
+            target: aarch64
+          - platform: macos-15-intel
+            target: x86_64
+          - platform: ubuntu-latest
+            target: x86_64
+            manylinux: "2014"
+          - platform: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: "2014"
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - platform: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - platform: windows-latest
+            target: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.15.0
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          command: build
+          args: --release --locked --compatibility pypi --out dist
+      - shell: bash
+        run: |
+          python -m venv wheel-venv
+          wheel-venv/bin/python -m pip install dist/*.whl || wheel-venv/Scripts/python -m pip install dist/*.whl
+          wheel-venv/bin/python -c "import sid; import sid._snippet" || wheel-venv/Scripts/python -c "import sid; import sid._snippet"
+          wheel-venv/bin/python -m pip check || wheel-venv/Scripts/python -m pip check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}-${{ matrix.target }}
+          path: dist/*.whl
+
+  linux-compatibility:
+    name: Install on ${{ matrix.image }}
+    needs: wheels
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      matrix:
+        image:
+          - debian:12-slim
+          - debian:13-slim
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-ubuntu-latest-x86_64
+          path: dist
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv venv wheel-venv
+      - run: uv pip install --python wheel-venv/bin/python dist/*.whl
+      - run: wheel-venv/bin/python -c "import sid; import sid._snippet"
+      - run: uv pip check --python wheel-venv/bin/python
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx maturin==1.15.0 sdist --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    needs: [wheels, linux-compatibility, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install twine
+      - run: python -m twine check dist/*
+      - run: python -c "import glob; assert len(glob.glob('dist/*.whl')) == 7; assert len(glob.glob('dist/*.tar.gz')) == 1"
+      - run: python scripts/check_artifacts.py dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
