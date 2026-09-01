@@ -17,9 +17,14 @@ import threading
 
 import pytest
 
-from sid import DocumentCache, DocumentView, DocumentViewWithSnippet, parse_rendered_model_facing_id
+from sid import (
+    DocumentCache,
+    DocumentView,
+    DocumentViewWithSnippet,
+    parse_rendered_model_facing_id,
+    render_markdown_table,
+)
 from sid.document_cache import insert_interval, overlap_list, plan_segments
-from sid.document_rendering import render_markdown_table
 from sid.id_stream import IdSpaceExhausted, IdStream
 
 WORDS = " ".join(f"w{i:04d}" for i in range(600))  # 600 words, 6*600-1 = 3599 chars
@@ -69,16 +74,19 @@ def test_parse_rejects_empty_ranges(ref):
 @pytest.mark.parametrize(
     ("ref", "expected"),
     [
-        ("a#-5:10", ("a", (-5, 10))),  # negative start clamps later, at the view
+        ("a#-5:10", ("a", (-5, 10))),
         ("a# 1:2", ("a", (1, 2))),
-        ("a#+1:2", ("a", (1, 2))),
-        ("a#1_0:20", ("a", (10, 20))),
+        ("a#1 : 2", ("a", (1, 2))),
     ],
 )
-def test_parse_offset_leniency_is_intentional(ref, expected):
-    # int() accepts whitespace, signs, and underscores; being lax here means
-    # fewer failed tool calls for the model. Bounds are the view's job.
+def test_parse_offset_whitespace_and_negative_start(ref, expected):
     assert parse_rendered_model_facing_id(ref) == expected
+
+
+@pytest.mark.parametrize("ref", ["a#+1:2", "a#1_0:20", "a#1.0:2", "a#--1:2"])
+def test_parse_rejects_non_decimal_offset_formatting(ref):
+    with pytest.raises(ValueError, match="character offsets"):
+        parse_rendered_model_facing_id(ref)
 
 
 # =========================================================================
@@ -191,6 +199,13 @@ def test_display_fields_default_to_every_document_field():
     cache.add_document("d", {"title": "T", "content": "some words here", "extra": "x"})
     xml = cache.get_single_span_document_view("d", "content").render_xml()
     assert 'title="T"' in xml and 'extra="x"' in xml
+
+
+def test_snippetless_view_requires_explicit_display_fields():
+    cache = DocumentCache()
+    cache.add_document("d", {"title": "T", "content": "some words here"})
+    with pytest.raises(TypeError, match="display_fields is required"):
+        cache.get_single_span_document_view("d")
 
 
 # =========================================================================
@@ -342,7 +357,7 @@ def test_markdown_table_empty():
 
 
 # =========================================================================
-# API contract: loud failures and clamping
+# API contract: loud failures and range resolution
 # =========================================================================
 
 
@@ -353,13 +368,19 @@ def test_add_document_returns_model_facing_id():
     assert cache.to_data_id(mid) == "d"
 
 
-def test_re_adding_a_document_fails_loudly():
-    # The seen ledger's offsets index the first content string; a silent
-    # replace would reset what the model has already been shown.
+def test_re_adding_a_document_is_an_idempotent_noop():
     cache = make_cache()
     cache.update_seen(read_view(cache, "doc-1", (0, 200)))
-    with pytest.raises(ValueError, match="add-once"):
-        cache.add_document("doc-1", {"title": "T", "content": WORDS})
+    original_id = cache.to_model_facing_id("doc-1")
+    original_document = cache.get_document("doc-1")
+
+    returned_id = cache.add_document(
+        "doc-1", {"title": "replacement", "content": "replacement"}
+    )
+
+    assert returned_id == original_id
+    assert cache.get_document("doc-1") is original_document
+    assert cache.get_document("doc-1")["content"] == WORDS
     assert cache.seen_ledger["doc-1"] == [(0, 200)]
 
 
@@ -390,20 +411,18 @@ def test_overlong_span_is_clamped():
 def test_negative_start_is_clamped():
     cache = DocumentCache()
     cache.add_document("d", {"content": "short text here"})
+    mid = cache.to_model_facing_id("d")
     view = cache.get_single_span_document_view(
         "d", "content", snippet_display_span=(-5, 10), display_fields=["content"]
     )
     assert view.snippet_display_spans == [(0, 10)]
+    assert view._render_parts()[0] == f"{mid}#0:10"
 
 
-def test_wholly_out_of_bounds_span_is_an_integration_error():
-    # No intersection with the document -> nothing to clamp to. The cache only
-    # sees pre-validated spans: bounds-checking model input (with the trained
-    # out-of-bounds message) is the tool layer's job, so this is a ValueError,
-    # not a ToolError.
+def test_wholly_out_of_bounds_span_is_rejected():
     cache = DocumentCache()
     cache.add_document("d", {"content": "short text here"})
-    with pytest.raises(ValueError, match="entirely outside"):
+    with pytest.raises(ValueError, match="does not overlap"):
         cache.get_single_span_document_view(
             "d", "content", snippet_display_span=(800, 1600), display_fields=["content"]
         )
@@ -423,32 +442,29 @@ def test_contains_model_facing_id():
     assert cache.contains_model_facing_id(fork_mid)
 
 
-def test_snap_char_range():
+def test_resolve_char_range_preserves_exact_character_boundaries():
     cache = DocumentCache()
     content = "alpha bravo charlie delta"
     cache.add_document("d", {"content": content})
 
-    # overlong end clamps to the document, then snaps to word boundaries
-    assert cache.snap_char_range("d", "content", (6, 20000)) == (6, len(content))
-    # negative start clamps to 0
-    assert cache.snap_char_range("d", "content", (-5, 11)) == (0, 11)
-    # mid-word edges snap outward
-    assert cache.snap_char_range("d", "content", (8, 14)) == (6, 19)
-    # a range entirely outside the document falls back to the full document
-    # (deliberate training-inference divergence), on either side
-    assert cache.snap_char_range("d", "content", (800, 1600)) == (0, len(content))
-    assert cache.snap_char_range("d", "content", (-10, -5)) == (0, len(content))
-    # unknown ids and fields are integration errors, not model mistakes
+    assert not hasattr(cache, "snap_char_range")
+    assert cache.resolve_char_range("d", "content", (6, 20000)) == (6, len(content))
+    assert cache.resolve_char_range("d", "content", (-5, 11)) == (0, 11)
+    assert cache.resolve_char_range("d", "content", (8, 14)) == (8, 14)
+    with pytest.raises(ValueError, match="does not overlap"):
+        cache.resolve_char_range("d", "content", (800, 1600))
+    with pytest.raises(ValueError, match="does not overlap"):
+        cache.resolve_char_range("d", "content", (-10, -5))
     with pytest.raises(KeyError):
-        cache.snap_char_range("ghost", "content", (0, 5))
+        cache.resolve_char_range("ghost", "content", (0, 5))
     with pytest.raises(KeyError):
-        cache.snap_char_range("d", "no_such_field", (0, 5))
+        cache.resolve_char_range("d", "no_such_field", (0, 5))
 
 
 def test_inverted_span_rejected():
     cache = DocumentCache()
     cache.add_document("d", {"content": "short text here"})
-    with pytest.raises(ValueError, match="start must be < end"):
+    with pytest.raises(ValueError, match="start 10 must be less than end 5"):
         cache.get_single_span_document_view(
             "d", "content", snippet_display_span=(10, 5), display_fields=["content"]
         )
@@ -475,15 +491,13 @@ format_drift = pytest.mark.xfail(
 )
 
 
-@format_drift
 def test_body_is_html_escaped():
-    # sam_sdk escaped &, <, > in the body (html.escape(quote=False)); the
-    # model was trained on escaped bodies. render_xml emits the body raw.
-    content = "a <b>bold</b> & escaped body " + "filler " * 30
+    content = 'a <b>"bold"</b> & escaped body ' + "filler " * 30
     cache = make_cache(content=content)
     view = read_view(cache, "doc-1", None)
     body = view.render_xml().split("\n", 1)[1]
     assert "&lt;b&gt;" in body and "&amp;" in body
+    assert '"bold"' in body
 
 
 @format_drift

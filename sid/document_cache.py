@@ -5,6 +5,12 @@ from typing import List, Dict, Tuple, Any
 from .document_rendering import DocumentView, DocumentViewWithSnippet
 from .id_stream import IdStream
 from ._snippet import bm25_snippet_with_stride
+from .ranges import (
+    InvalidCharacterRange,
+    RangeMode,
+    resolve_char_range as _resolve_char_range,
+    validate_range_mode,
+)
 
 # Snippet size in Alyze UAX #29 source-token positions.
 SNIPPET_SIZE_DEFAULT = 50
@@ -124,7 +130,11 @@ def plan_segments(
 
 
 class DocumentCache:
-    def __init__(self, language: str = "english"):
+    def __init__(
+        self,
+        language: str = "english",
+        range_mode: RangeMode = "lenient",
+    ):
         """Create a cache whose snippets use ``language`` by default.
 
         Named languages lowercase tokens and apply Alyze's language-specific
@@ -132,16 +142,18 @@ class DocumentCache:
         Individual ``apply_snippet`` calls may override this setting.
         """
         self.language = _validate_language(language)
+        self.range_mode = validate_range_mode(range_mode)
         # Shared by reference across forks, guarded by the shared _mapping_lock.
         self._id_mapping_lock = Lock()
         self._to_data_id = {}
         self._to_model_facing_id = {}
         self.model_facing_id_stream = IdStream()
 
-        # Per-instance documents and seen ledger, guarded by the per-instance _documents_lock.
+        # The document store is shared across forks. Seen state belongs to one fork.
         self._documents_lock = Lock()
         self.documents = {}
-        self.seen_ledger = {} # Lookup data_id -> list[Interval]
+        self._seen_lock = Lock()
+        self.seen_ledger = {}  # Lookup data_id -> list[Interval]
 
     def _add_mapping(self, data_id: str, model_facing_id: str):
         """Record ``data_id <-> model_facing_id`` in both directions. The
@@ -178,62 +190,82 @@ class DocumentCache:
                 "id mappings are inconsistent:\n" + "\n".join(mismatches)
             )
 
+    def _validate_store(self):
+        """Check that the shared document store and id mapping agree exactly."""
+        with self._documents_lock:
+            with self._id_mapping_lock:
+                self._validate_mapping_locked()
+                document_ids = set(self.documents)
+                mapped_ids = set(self._to_model_facing_id)
+                if document_ids != mapped_ids:
+                    missing_documents = sorted(mapped_ids - document_ids)
+                    missing_mappings = sorted(document_ids - mapped_ids)
+                    details = []
+                    if missing_documents:
+                        details.append(
+                            f"mapped ids without documents: {missing_documents!r}"
+                        )
+                    if missing_mappings:
+                        details.append(
+                            f"documents without mapped ids: {missing_mappings!r}"
+                        )
+                    raise ValueError(
+                        "document store and id mapping are inconsistent: "
+                        + "; ".join(details)
+                    )
+
     def to_data_id(self, model_facing_id: str) -> str:
         """The data_id (your database id) behind ``model_facing_id``. Global
         to the fork family, like the mapping itself. Raises ``KeyError`` for
         an id the family never minted — test model-provided ids with
         ``contains_model_facing_id`` instead of catching this."""
-        try:
-            return self._to_data_id[model_facing_id]
-        except KeyError:
-            raise KeyError(
-                (f"model_facing_id {model_facing_id} not found in cache. use "
-                "DocumentCache._validate_mapping() to check for inconsistencies.")
-            ) from None
+        with self._id_mapping_lock:
+            try:
+                return self._to_data_id[model_facing_id]
+            except KeyError:
+                raise KeyError(
+                    (f"model_facing_id {model_facing_id} not found in cache. use "
+                    "DocumentCache._validate_mapping() to check for inconsistencies.")
+                ) from None
 
     def to_model_facing_id(self, data_id: str) -> str:
         """The model facing id minted for ``data_id``. Global to the fork
         family. Raises ``KeyError`` if no cache in the family has added the
         document."""
-        try:
-            return self._to_model_facing_id[data_id]
-        except KeyError:
-            raise KeyError(
-                (f"data_id {data_id} not found in cache. use "
-                "DocumentCache._validate_mapping() to check for inconsistencies.")
-            ) from None
+        with self._id_mapping_lock:
+            try:
+                return self._to_model_facing_id[data_id]
+            except KeyError:
+                raise KeyError(
+                    (f"data_id {data_id} not found in cache. use "
+                    "DocumentCache._validate_mapping() to check for inconsistencies.")
+                ) from None
 
     def _mint_model_facing_id(self) -> str:
         """A short id not yet used by this cache or any cache forked from it."""
         return next(self.model_facing_id_stream)
 
     def add_document(self, data_id: str, document: Dict[str, Any]) -> str:
-        """Add a document to this cache and return its model facing id (minted
-        on first use, stable across forks sharing this cache's id mapping).
+        """Add a document and return its stable, fork-family model-facing id.
 
-        Documents are add-once per cache instance: the seen ledger's character
-        offsets index the content that was added first, so adding the same
-        data_id again raises instead of silently replacing the document and
-        resetting what the model has already been shown. Guard with
-        ``data_id in cache`` when the same document can come back from
-        several searches."""
+        The first insertion stores one deep copy. Re-adding a bound ``data_id``
+        is an idempotent lookup and does not inspect or replace the stored copy.
+        """
         with self._documents_lock:
-            if data_id in self.documents:
-                raise ValueError(
-                    f"data_id {data_id!r} is already in this cache; documents are add-once "
-                    f"per cache instance — the seen ledger's offsets index the content that "
-                    f"was added first"
-                )
-            self.documents[data_id] = document
-            self.seen_ledger[data_id] = []
+            stored_document = None
+            if data_id not in self.documents:
+                stored_document = copy.deepcopy(document)
+            with self._id_mapping_lock:
+                model_facing_id = self._to_model_facing_id.get(data_id)
+                if model_facing_id is None:
+                    model_facing_id = self._mint_model_facing_id()
+                if stored_document is not None:
+                    self.documents[data_id] = stored_document
+                if data_id not in self._to_model_facing_id:
+                    self._add_mapping(data_id, model_facing_id)
 
-        with self._id_mapping_lock:
-
-            if data_id in self._to_model_facing_id:
-                model_facing_id = self.to_model_facing_id(data_id)
-            else:
-                model_facing_id = self._mint_model_facing_id()
-                self._add_mapping(data_id, model_facing_id)
+        with self._seen_lock:
+            self.seen_ledger.setdefault(data_id, [])
 
         return model_facing_id
 
@@ -242,8 +274,9 @@ class DocumentCache:
         cache's seen ledger, so later views of the same document collapse
         them to ``[seen: ...]`` markers. Call after rendering a view; a
         snippet-less view has no display spans and records nothing."""
-        with self._documents_lock:
-            seen_spans = self.seen_ledger[document_view.data_id]
+        self.get_document(document_view.data_id)
+        with self._seen_lock:
+            seen_spans = self.seen_ledger.setdefault(document_view.data_id, [])
 
             for char_span in document_view.snippet_display_spans:
                 seen_spans = insert_interval(seen_spans, char_span)
@@ -256,7 +289,9 @@ class DocumentCache:
         Python-character span of the ``snippet_size`` source-token stretch of
         ``content`` most relevant to ``query``. Unigram and bigram BM25 scores
         are calculated by the native Alyze selector. Override in a subclass
-        to swap in a different selection strategy."""
+        to swap in a different selection strategy. A query whose analyzed
+        tokens are all stopwords gives every window a zero score and
+        deliberately returns the beginning of the document."""
         stride = stride_size(snippet_size)
         span = bm25_snippet_with_stride(
             query,
@@ -285,9 +320,9 @@ class DocumentCache:
         your database id (and anything else private) out of the dict, or pass
         display_fields to display only a subset.
         """
-        with self._documents_lock:
-            document = self.documents[data_id]
-            seen = self.seen_ledger[data_id]
+        document = self.get_document(data_id)
+        with self._seen_lock:
+            seen = list(self.seen_ledger.get(data_id, []))
 
         model_facing_id = self.to_model_facing_id(data_id)
 
@@ -308,6 +343,12 @@ class DocumentCache:
 
         effective_language = self.language if language is None else _validate_language(language)
         span = self.snippet_fn(query, content, snippet_size, effective_language)
+        span = _resolve_char_range(
+            span,
+            len(content),
+            mode="strict",
+            document_id=data_id,
+        )
 
         if overlap_list(span, seen) == [span]:
             snippet_seen_spans = [span]
@@ -331,23 +372,25 @@ class DocumentCache:
         your database id (and anything else private) out of the dict, or pass
         display_fields to display only a subset.
 
-        A span reaching past the end of the document is clamped to the
-        document's length (the rendered ranged id names the clamped span, so
-        it stays a verbatim-slice contract). A span lying entirely outside the
-        document raises ``ValueError``: like every exception this class
-        raises, it means a bug in the integration — model-provided spans are
-        the tool layer's job to bounds-check (with the trained message) before
-        building a view.
+        The configured range policy resolves a supplied span before rendering.
+        The rendered ranged id always names the exact, verbatim Python slice.
         """
 
         document = self.get_document(data_id)
         model_facing_id = self.to_model_facing_id(data_id)
 
+        if snippet_field is None:
+            if display_fields is None:
+                raise TypeError(
+                    f"display_fields is required when snippet_field is None: the default "
+                    f"(every field of document {data_id!r}) would render the full content "
+                    f"inside an attribute of an empty <doc> tag. Pass the metadata fields "
+                    f"to list, e.g. display_fields=['title', 'date']"
+                )
+            return DocumentView(data_id, model_facing_id, document, display_fields)
+
         if display_fields is None:
             display_fields = document.keys()
-
-        if snippet_field is None:
-            return DocumentView(data_id, model_facing_id, document, display_fields)
 
         content = document[snippet_field]
         if not isinstance(content, str) or not content:
@@ -359,18 +402,11 @@ class DocumentCache:
         if snippet_display_span is None:
             snippet_display_span = (0, len(content))
         else:
-            start, end = snippet_display_span
-            if start >= end:
-                raise ValueError(
-                    f"empty span {start}:{end} for document {data_id!r} (start must be < end)"
-                )
-            if start >= len(content):
-                raise ValueError(
-                    f"span {start}:{end} lies entirely outside document {data_id!r} "
-                    f"({len(content)} chars); bounds-check model-provided spans in "
-                    f"your tool layer before building a view"
-                )
-            snippet_display_span = (max(0, start), min(end, len(content)))
+            snippet_display_span = self.resolve_char_range(
+                data_id,
+                snippet_field,
+                snippet_display_span,
+            )
 
         return DocumentViewWithSnippet(
             data_id,
@@ -382,46 +418,30 @@ class DocumentCache:
             display_fields
         )
 
-    def snap_char_range(self, data_id: str, snippet_field: str, char_range: Tuple[int, int]) -> Tuple[int, int]:
-        """A model-requested ``char_range``, made displayable: clamped to the
-        document, then edges snapped outward to word boundaries, exactly as
-        trained. A range lying entirely outside the document returns the full
-        document instead — a deliberate training-inference divergence that
-        keeps every model-provided range renderable.
-
-        Raises ``KeyError`` for an unknown ``data_id`` or missing
-        ``snippet_field``: like every exception this class raises, that means
-        a bug in the integration, not a model mistake."""
+    def resolve_char_range(
+        self,
+        data_id: str,
+        snippet_field: str,
+        char_range: tuple[int, int],
+    ) -> tuple[int, int]:
+        """Resolve ``char_range`` to an exact half-open slice of a document."""
         content = self.get_document(data_id)[snippet_field]
-        start, end = char_range
-        if start >= len(content) or end <= 0:
-            return 0, len(content)
-        start, end = max(0, start), min(end, len(content))
-        while start > 0 and not content[start - 1].isspace():
-            start -= 1
-        while end < len(content) and not content[end].isspace():
-            end += 1
-        return start, end
+        if not isinstance(content, str) or not content:
+            raise TypeError(
+                f"snippet field {snippet_field!r} of document {data_id!r} must be a "
+                f"non-empty string, got {content!r}"
+            )
+        return _resolve_char_range(
+            char_range,
+            len(content),
+            mode=self.range_mode,
+            document_id=data_id,
+        )
 
     def __contains__(self, data_id: str) -> bool:
-        """True if this cache instance holds a document for ``data_id``.
-
-        Membership is fork-local: forks copy ``documents``, so a document a
-        sibling fork added after the split is not a member here even though
-        the shared id mapping (one per fork family) may already know its
-        data_id. Takes data_ids, like ``get_document`` — not model facing ids."""
+        """True if this fork family holds a document for ``data_id``."""
         with self._documents_lock:
             return data_id in self.documents
-
-    def contains_global(self, data_id: str) -> bool:
-        """True if any cache in this fork family has added a document for
-        ``data_id`` — i.e. it has a model facing id in the shared id mapping.
-
-        Global membership does not imply local membership: a data_id added by
-        a sibling fork is global but not ``in`` this instance, and its
-        document is not readable here. Takes data_ids, like ``__contains__``."""
-        with self._id_mapping_lock:
-            return data_id in self._to_model_facing_id
 
     def contains_model_facing_id(self, model_facing_id: str) -> bool:
         """True if ``model_facing_id`` was minted by any cache in this fork
@@ -429,25 +449,16 @@ class DocumentCache:
         model-provided ids, so the tool layer can reject hallucinated ids
         without exception-driven control flow.
 
-        Like ``contains_global`` (and unlike ``__contains__``), this spans the
-        whole fork family via the shared id mapping: True does not imply the
-        document is readable on *this* instance — a sibling fork may have
-        added it. Takes model facing ids, not data_ids."""
+        A recognized id always names a document readable by every member of
+        the fork family. Takes model-facing ids, not data ids."""
         with self._id_mapping_lock:
             return model_facing_id in self._to_data_id
 
     def get_document(self, data_id: str) -> Dict[str, Any]:
-        """The document dict this cache instance holds for ``data_id``.
-
-        Raises ``KeyError`` if this instance never added the document, with a
-        message distinguishing a data_id only a sibling fork added from one
-        the fork family has never seen."""
+        """Return the fork-family document stored for ``data_id``."""
         with self._documents_lock:
             if data_id not in self.documents:
-                if data_id in self._to_model_facing_id:
-                    raise KeyError(f"data_id {data_id} not found in the document cache for this instance, but is in the global id mapping")
-                else:
-                    raise KeyError(f"data_id {data_id} not found in the document cache")
+                raise KeyError(f"data_id {data_id} not found in the document cache")
 
             return self.documents[data_id]
 
@@ -456,27 +467,29 @@ class DocumentCache:
         either lookup's ``KeyError`` propagates."""
         return self.get_document(self.to_data_id(model_facing_id))
 
-    def fork(self, n_forks: int) -> List['DocumentCache']:
-        """Split off n_forks caches that share this cache's id space.
+    @classmethod
+    def _sibling(
+        cls,
+        source: 'DocumentCache',
+        seen_ledger: Dict[str, List[Interval]],
+    ) -> 'DocumentCache':
+        """Build a fork-family sibling without allocating throwaway state."""
+        child = cls.__new__(cls)
+        child.language = source.language
+        child.range_mode = source.range_mode
+        child._to_data_id = source._to_data_id
+        child._to_model_facing_id = source._to_model_facing_id
+        child._id_mapping_lock = source._id_mapping_lock
+        child.model_facing_id_stream = source.model_facing_id_stream
+        child._documents_lock = source._documents_lock
+        child.documents = source.documents
+        child._seen_lock = Lock()
+        child.seen_ledger = {key: list(spans) for key, spans in seen_ledger.items()}
+        return child
 
-        Parent and forks keep one model_facing_id <-> data_id mapping (shared
-        by reference, including the lock and id stream, so ids never collide
-        or diverge across forks). Documents and the seen ledger are copied:
-        each fork starts from this cache's current state but evolves
-        independently afterwards.
-        """
-        with self._documents_lock:
-            documents_snapshot = dict(self.documents)
+    def fork(self, n_forks: int) -> List['DocumentCache']:
+        """Create caches sharing documents and ids, with copied seen state."""
+        with self._seen_lock:
             seen_snapshot = {k: list(v) for k, v in self.seen_ledger.items()}
 
-        forks = []
-        for _ in range(n_forks):
-            child = DocumentCache(language=self.language)
-            child._to_data_id = self._to_data_id
-            child._to_model_facing_id = self._to_model_facing_id
-            child._id_mapping_lock = self._id_mapping_lock
-            child.model_facing_id_stream = self.model_facing_id_stream
-            child.documents = copy.deepcopy(documents_snapshot)
-            child.seen_ledger = {k: list(v) for k, v in seen_snapshot.items()}
-            forks.append(child)
-        return forks
+        return [DocumentCache._sibling(self, seen_snapshot) for _ in range(n_forks)]

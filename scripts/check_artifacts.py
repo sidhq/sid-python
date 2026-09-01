@@ -25,7 +25,7 @@ def check_wheel(path: Path) -> None:
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = BytesParser().parsebytes(archive.read(metadata_name))
         assert metadata["Name"] == "sid-sdk"
-        assert metadata["Version"] == "0.1.0"
+        assert metadata["Version"] == "0.2.0"
         assert metadata["License-Expression"] == "MIT"
         requirements = "\n".join(metadata.get_all("Requires-Dist", []))
         assert not any(name in requirements.lower() for name in FORBIDDEN_REQUIREMENTS)

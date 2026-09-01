@@ -35,7 +35,7 @@ def test_fork_inherits_documents_and_seen():
     assert fork.seen_ledger["doc-a"] == [(0, 200)]
 
 
-def test_fork_isolation():
+def test_fork_shares_documents_but_isolates_seen_ledgers():
     parent = DocumentCache()
     parent.add_document("doc-a", make_doc("a"))
 
@@ -45,30 +45,32 @@ def test_fork_isolation():
     fork_1.update_seen(seen_view(fork_1, "doc-a", (0, 200)))
 
     for other in (parent, fork_2):
-        assert "doc-b" not in other.documents
+        assert "doc-b" in other
+        assert other.get_document("doc-b") is fork_1.get_document("doc-b")
         assert other.seen_ledger["doc-a"] == []
     assert fork_1.seen_ledger["doc-a"] == [(0, 200)]
 
 
-def test_fork_documents_are_deepcopied():
+def test_fork_documents_are_shared():
     parent = DocumentCache()
     parent.add_document("doc-a", make_doc("a"))
 
     fork, = parent.fork(1)
-    fork.get_document("doc-a")["meta"]["tag"] = "mutated"
-
-    assert parent.get_document("doc-a")["meta"]["tag"] == "a"
+    assert fork.get_document("doc-a") is parent.get_document("doc-a")
 
 
 def test_parent_usable_after_fork():
     parent = DocumentCache()
     parent.add_document("doc-a", make_doc("a"))
-    parent.fork(2)
+    children = parent.fork(2)
 
     parent.add_document("doc-c", make_doc("c"))
+    for child in children:
+        assert child.get_document("doc-c") is parent.get_document("doc-c")
     view = parent.apply_snippet("doc-a", "content", "word")
     parent.update_seen(view)
     parent._validate_mapping()
+    parent._validate_store()
 
 
 def test_shared_mapping_same_document_same_id():
@@ -105,7 +107,63 @@ def test_fork_of_fork():
 
     id_g = grandfork.add_document("doc-g", make_doc("g"))
     assert parent.to_data_id(id_g) == "doc-g"
-    assert "doc-g" not in fork.documents
+    assert "doc-g" in parent
+    assert "doc-g" in fork
+    assert parent.get_document("doc-g") is grandfork.get_document("doc-g")
+
+
+def test_sibling_can_read_and_snippet_document_added_after_fork():
+    parent = DocumentCache()
+    writer, reader = parent.fork(2)
+    model_id = writer.add_document("doc-b", make_doc("b"))
+
+    assert "doc-b" in parent
+    assert "doc-b" in reader
+    assert not hasattr(parent, "contains_global")
+    assert reader.get_document_from_model_facing_id(model_id) is writer.get_document("doc-b")
+    view = reader.apply_snippet("doc-b", "content", "word")
+    assert view.data_id == "doc-b"
+    assert view.snippet_display_spans
+
+
+def test_seen_ledger_is_isolated_for_lazily_discovered_document():
+    parent = DocumentCache()
+    writer, reader = parent.fork(2)
+    writer.add_document("doc-b", make_doc("b"))
+
+    view = reader.get_single_span_document_view(
+        "doc-b", "content", snippet_display_span=(0, 200)
+    )
+    reader.update_seen(view)
+
+    assert reader.seen_ledger["doc-b"] == [(0, 200)]
+    assert "doc-b" not in parent.seen_ledger
+    assert writer.seen_ledger["doc-b"] == []
+
+
+def test_add_document_deepcopies_input_exactly_once(monkeypatch):
+    import sid.document_cache as document_cache_module
+
+    original_deepcopy = document_cache_module.copy.deepcopy
+    calls = []
+
+    def recording_deepcopy(value):
+        calls.append(value)
+        return original_deepcopy(value)
+
+    monkeypatch.setattr(document_cache_module.copy, "deepcopy", recording_deepcopy)
+    cache = DocumentCache()
+    supplied = make_doc("a")
+    model_id = cache.add_document("doc-a", supplied)
+    stored = cache.get_document("doc-a")
+
+    supplied["meta"]["tag"] = "mutated by caller"
+    assert stored["meta"]["tag"] == "a"
+    assert calls == [supplied]
+
+    assert cache.add_document("doc-a", make_doc("ignored")) == model_id
+    cache.fork(3)
+    assert calls == [supplied]
 
 
 # ---------------------------------------------------------------- thread safety
@@ -154,8 +212,12 @@ def test_concurrent_adds_across_forks():
     run_threads([worker(t, c) for t, c in enumerate(caches)])
 
     parent._validate_mapping()
+    parent._validate_store()
     minted = [c.to_model_facing_id(f"doc-{t}-{i}") for t, c in enumerate(caches) for i in range(n_docs)]
     assert len(set(minted)) == n_threads * n_docs
+    assert len(parent.documents) == n_threads * n_docs
+    for cache in caches:
+        assert cache.documents is parent.documents
 
 
 def test_fork_while_writing():
@@ -163,8 +225,7 @@ def test_fork_while_writing():
     stop = threading.Event()
 
     def writer(tid):
-        # unique ids per thread (documents are add-once), bounded so the
-        # writers cannot outrun the fork loop's deepcopies
+        # Unique ids per thread, bounded to keep this stress test finite.
         for i in range(1000):
             if stop.is_set():
                 break
@@ -178,9 +239,9 @@ def test_fork_while_writing():
     try:
         for _ in range(50):
             fork, = parent.fork(1)
-            # a fork must never be torn: every document has a ledger entry
-            assert set(fork.documents) == set(fork.seen_ledger)
+            assert set(fork.seen_ledger) <= set(fork.documents)
             fork._validate_mapping()
+            fork._validate_store()
     finally:
         stop.set()
         for t in threads:

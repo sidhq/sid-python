@@ -1,4 +1,5 @@
 import html
+import re
 from typing import List, Dict, Tuple, Any
 
 
@@ -12,9 +13,9 @@ def parse_rendered_model_facing_id(model_id_with_char_span):
     ``ValueError`` carrying the trained message: the reference is model input,
     so your tool layer should catch ``ValueError`` around this call and
     re-raise it as its tool-error type, feeding the message back to the model
-    as a failed tool call. The offsets are parsed with ``int()``, which is
-    deliberately lenient about formatting; bounds against the document are the
-    view's job, not the parser's."""
+    as a failed tool call. Surrounding whitespace is accepted around each
+    offset, but the offsets themselves must be signed decimal integers. Bounds
+    against the document are the view's job, not the parser's."""
     if not isinstance(model_id_with_char_span, str) or not model_id_with_char_span:
         raise ValueError(
             f"invalid document reference {model_id_with_char_span!r}: expected a non-empty string"
@@ -28,16 +29,21 @@ def parse_rendered_model_facing_id(model_id_with_char_span):
             f"invalid document reference {model_id_with_char_span!r}: missing document id before "
             f"'{ID_SEPARATOR}'"
         )
-    try:
-        char_span = tuple(int(x) for x in char_span_str.split(SPAN_SEPARATOR))
-    except ValueError:
-        char_span = ()
-    if len(char_span) != 2:
+    offset_parts = char_span_str.split(SPAN_SEPARATOR)
+    if len(offset_parts) != 2:
         raise ValueError(
             f"invalid document reference {model_id_with_char_span!r}: expected "
             f"'<doc_id>{ID_SEPARATOR}<start>:<end>' with integer character "
             f"offsets, e.g. '{model_facing_id}{ID_SEPARATOR}10:70'"
         )
+    stripped_parts = tuple(part.strip() for part in offset_parts)
+    if not all(re.fullmatch(r"-?\d+", part) for part in stripped_parts):
+        raise ValueError(
+            f"invalid document reference {model_id_with_char_span!r}: expected "
+            f"'<doc_id>{ID_SEPARATOR}<start>:<end>' with decimal integer character "
+            f"offsets, e.g. '{model_facing_id}{ID_SEPARATOR}10:70'"
+        )
+    char_span = tuple(int(part) for part in stripped_parts)
     start, end = char_span
     if start >= end:
         raise ValueError(
@@ -112,7 +118,7 @@ class DocumentView:
         if body is None:
             return f'<doc {" ".join(parts)}></doc>'
         else:
-            return f'<doc {" ".join(parts)}>\n{body}\n</doc>'
+            return f'<doc {" ".join(parts)}>\n{_esc(body)}\n</doc>'
 
 
 class DocumentViewWithSnippet(DocumentView):

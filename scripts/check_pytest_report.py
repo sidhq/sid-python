@@ -1,4 +1,4 @@
-"""Verify that only the two documented strict xfails are skipped."""
+"""Verify that only the documented strict xfail is skipped."""
 
 from pathlib import Path
 import sys
@@ -6,7 +6,6 @@ import xml.etree.ElementTree as ET
 
 
 EXPECTED_XFAILS = {
-    "tests.test_sdk_invariants.test_body_is_html_escaped",
     "tests.test_sdk_invariants.test_fully_seen_row_drops_display_attrs",
 }
 
@@ -21,7 +20,7 @@ def main(path: str) -> int:
     if skipped != EXPECTED_XFAILS:
         print(f"expected xfails {sorted(EXPECTED_XFAILS)}, got {sorted(skipped)}")
         return 1
-    print("verified the two documented strict xfails")
+    print("verified the documented strict xfail")
     return 0
 
 
