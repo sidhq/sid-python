@@ -1,22 +1,24 @@
-"""Collision-free streams of short, token-cheap model-facing ids.
+"""Collision-free streams of short model-facing ids.
 
 ``IdStream`` yields ids that are distinct *by construction*: it walks a keyed
 pseudorandom permutation of its id space with a counter, so two draws from one
 stream can never coincide. There is no retry-on-collision loop and no fallback
 path that could silently hand out a duplicate.
 
-Token cost drove the default alphabet. Measured mean tokens per id, across
+The default is six ASCII digits, kept as strings to preserve leading zeros.
+This prioritizes model reference accuracy over the previous five-letter
+default's token cost. Historical mean tokens per id, across
 Qwen3.5 / Qwen2.5 / o200k / cl100k::
 
     6 digits        6.00  6.00  2.00  2.00   <- digits are one-token-each on Qwen
     8 hex chars     7.15  7.15  4.86  4.84
     4 letters       2.79  2.82  2.64  2.82
-    5 lowercase     2.81  2.87  2.77  2.87   <- default
+    5 lowercase     2.81  2.87  2.77  2.87
     4 lowercase     2.25  2.30  2.22  2.30
 
-Digit- and hex-based ids are both expensive and *unstable* across tokenizers,
-so the defaults are letters only. Lowercase only, because the model echoes
-these ids back verbatim and a case slip must not turn into a lookup miss.
+The default space holds 1,000,000 ids (000000 through 999999). Uniqueness is
+scoped to one stream, including caches sharing that stream across forks;
+independently created streams can overlap.
 
 Forking: an ``IdStream`` is safe to share by reference across forked caches,
 and that is the intended use — a shared stream keeps one counter, so no two
@@ -35,8 +37,8 @@ __all__ = ["IdStream", "IdSpaceExhausted"]
 # silently corrupt that split.
 FORBIDDEN_CHARS = "#:"
 
-DEFAULT_ALPHABET = string.ascii_lowercase
-DEFAULT_LENGTH = 5  # 11,881,376 ids, ~2.8 tokens, ~95% cost 3 tokens or fewer
+DEFAULT_ALPHABET = string.digits
+DEFAULT_LENGTH = 6  # 1,000,000 fixed-width string ids, including leading zeros
 
 _ROUNDS = 4
 
@@ -67,12 +69,13 @@ class IdStream:
     True
 
     Args:
-        alphabet: characters ids are built from. Must exclude ``#`` and ``:``.
+        alphabet: characters ids are built from; defaults to ASCII digits.
+            Must exclude ``#`` and ``:``.
         length: characters per id. The space holds ``len(alphabet) ** length``
             ids; exceeding it raises ``IdSpaceExhausted`` rather than repeating.
         seed: fixes the sequence for reproducible runs. ``None`` (the default)
-            draws a fresh random permutation per stream, so ids do not repeat
-            across sessions.
+            draws a fresh random permutation per stream. Different streams
+            may still produce the same ids; these are not global identifiers.
     """
 
     def __init__(

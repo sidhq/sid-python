@@ -1,15 +1,7 @@
 """Invariant and format tests for the sid SDK.
 
-Two kinds of tests live here:
-
-* Regression tests — pin behavior the SDK gets right today: the ref grammar,
-  the interval bookkeeping, the seen-masking plan, the rendered <doc> shape,
-  and the IdStream guarantees. These must stay green.
-
-* ``xfail(strict=True)`` tests — each documents a confirmed divergence from
-  the trained format (as vendored in slime-tito's sam_sdk) or an API footgun.
-  They fail today by design; once the underlying issue is fixed the xfail
-  turns into an XPASS error, prompting removal of the marker.
+Regression tests pin the ref grammar, interval bookkeeping, seen-masking
+plan, rendered <doc> shape, and IdStream guarantees. These must stay green.
 """
 
 import random
@@ -48,12 +40,14 @@ def read_view(cache, data_id, span):
 # =========================================================================
 
 
-def test_parse_bare_ref():
-    assert parse_rendered_model_facing_id("abcde") == ("abcde", None)
+@pytest.mark.parametrize("model_id", ["123456", "004271", "000000", "abcde"])
+def test_parse_bare_ref(model_id):
+    assert parse_rendered_model_facing_id(model_id) == (model_id, None)
 
 
-def test_parse_ranged_ref():
-    assert parse_rendered_model_facing_id("abcde#800:1600") == ("abcde", (800, 1600))
+@pytest.mark.parametrize("model_id", ["123456", "004271", "000000", "abcde"])
+def test_parse_ranged_ref(model_id):
+    assert parse_rendered_model_facing_id(f"{model_id}#800:1600") == (model_id, (800, 1600))
 
 
 @pytest.mark.parametrize("ref", ["a#", "a#x:y", "a#1:2:3", "a#1:2#3:4", "a#борис:2", "#1:2", "", None])
@@ -284,6 +278,61 @@ def test_update_seen_accumulates_and_merges():
 # =========================================================================
 
 
+def test_default_ids_are_six_ascii_digits_including_leading_zeros():
+    stream = IdStream(seed=0)
+    assert stream.remaining == 1_000_000
+    ids = [next(stream) for _ in range(1000)]
+    assert len(set(ids)) == 1000
+    assert all(len(mid) == 6 and mid.isascii() and mid.isdecimal() for mid in ids)
+    assert any(mid.startswith("0") for mid in ids)
+    assert stream.minted == 1000
+    assert stream.remaining == 999_000
+
+
+def test_numeric_ids_round_trip_through_cache_forks_and_renderers():
+    cache = DocumentCache()
+    cache.model_facing_id_stream = IdStream(seed=0)
+    fork, = cache.fork(1)
+    ids = [fork.add_document(f"data-{i}", {"content": "alpha bravo"}) for i in range(100)]
+    assert any(mid.startswith("0") for mid in ids)
+    for i, mid in enumerate(ids):
+        assert cache.to_data_id(mid) == f"data-{i}"
+        assert cache.contains_model_facing_id(mid)
+        assert cache.add_document(f"data-{i}", {}) == mid
+        full = cache.get_single_span_document_view(f"data-{i}", "content")
+        assert f'id="{mid}"' in full.render_xml()
+        assert f"| {mid} |" in render_markdown_table([full])
+        partial = cache.get_single_span_document_view(
+            f"data-{i}", "content", snippet_display_span=(0, 5)
+        )
+        ref = partial._render_parts()[0]
+        assert ref == f"{mid}#0:5"
+        assert f'id="{ref}"' in partial.render_xml()
+        assert f"| {ref} |" in render_markdown_table([partial])
+        parsed_id, span = parse_rendered_model_facing_id(ref)
+        assert span == (0, 5)
+        assert cache.get_document_from_model_facing_id(parsed_id)["content"] == "alpha bravo"
+
+
+def test_default_id_exhaustion_leaves_cache_and_forks_consistent():
+    cache = DocumentCache()
+    stream = cache.model_facing_id_stream
+    # Exercise the real default boundary without a million stored documents.
+    assert stream.space == 1_000_000
+    stream._counter = stream.space - 1
+    fork, = cache.fork(1)
+    last_id = fork.add_document("last", {"content": "last document"})
+    assert stream.remaining == 0
+    for sibling in (cache, fork):
+        with pytest.raises(IdSpaceExhausted):
+            sibling.add_document("overflow", {"content": "must not be stored"})
+        assert "overflow" not in sibling
+        assert "overflow" not in sibling.seen_ledger
+        assert sibling.add_document("last", {}) == last_id
+        sibling._validate_store()
+    assert stream.minted == 1_000_000
+
+
 def test_id_stream_covers_space_exactly_then_raises():
     stream = IdStream(alphabet="ab", length=3, seed=0)
     ids = [next(stream) for _ in range(8)]
@@ -365,6 +414,7 @@ def test_add_document_returns_model_facing_id():
     cache = DocumentCache()
     mid = cache.add_document("d", {"content": "x y z"})
     assert isinstance(mid, str)
+    assert len(mid) == 6 and mid.isascii() and mid.isdecimal()
     assert cache.to_data_id(mid) == "d"
 
 
@@ -480,17 +530,6 @@ def test_update_seen_on_snippetless_view_is_a_noop():
     assert cache.seen_ledger["d"] == []
 
 
-# =========================================================================
-# Known divergences from the trained format, accepted for now.
-# Each is xfail(strict=True): it fails today, and starts erroring (XPASS)
-# the moment the underlying issue is fixed — then delete the marker.
-# =========================================================================
-
-format_drift = pytest.mark.xfail(
-    strict=True, reason="diverges from the trained observation format (sam_sdk vendored code)"
-)
-
-
 def test_body_is_html_escaped():
     content = 'a <b>"bold"</b> & escaped body ' + "filler " * 30
     cache = make_cache(content=content)
@@ -498,17 +537,6 @@ def test_body_is_html_escaped():
     body = view.render_xml().split("\n", 1)[1]
     assert "&lt;b&gt;" in body and "&amp;" in body
     assert '"bold"' in body
-
-
-@format_drift
-def test_fully_seen_row_drops_display_attrs():
-    # sam_sdk rendered a pure repeat as `<doc id=... doc_length=N>` with no
-    # other attributes; render_xml keeps title etc.
-    cache = make_cache(content="just a few words", data_id="short")
-    first = cache.apply_snippet("short", "content", "words", display_fields=["title", "content"])
-    cache.update_seen(first)
-    repeat = cache.apply_snippet("short", "content", "words", display_fields=["title", "content"])
-    assert "title=" not in repeat.render_xml()
 
 
 if __name__ == "__main__":

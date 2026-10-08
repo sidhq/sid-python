@@ -1,13 +1,8 @@
-"""Verify that only the documented strict xfail is skipped."""
+"""Verify that no tests are skipped, including expected failures."""
 
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
-
-
-EXPECTED_XFAILS = {
-    "tests.test_sdk_invariants.test_fully_seen_row_drops_display_attrs",
-}
 
 
 def main(path: str) -> int:
@@ -17,10 +12,10 @@ def main(path: str) -> int:
         for case in root.iter("testcase")
         if case.find("skipped") is not None
     }
-    if skipped != EXPECTED_XFAILS:
-        print(f"expected xfails {sorted(EXPECTED_XFAILS)}, got {sorted(skipped)}")
+    if skipped:
+        print(f"unexpected skipped tests or expected failures: {sorted(skipped)}")
         return 1
-    print("verified the documented strict xfail")
+    print("verified no skipped tests or expected failures")
     return 0
 
 

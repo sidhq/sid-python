@@ -49,6 +49,29 @@ accepts a one-call `language=` override, and forks inherit the cache default.
 If every query token is a stopword, all windows have the same score and the
 selector deliberately returns the beginning of the document.
 
+## Model-facing IDs
+
+New caches assign six ASCII digit strings, from `"000000"` through `"999999"`,
+instead of the previous five lowercase letters. IDs remain strings: preserve
+leading zeros in storage, JSON tool schemas, and model responses. For example,
+`"004271"` and the ranged reference `"004271#10:70"` identify the same document.
+Database IDs are unchanged. Parsers still accept older letter-based references;
+resolving any reference requires its original cache mapping.
+
+Each cache family can mint 1,000,000 distinct IDs over its lifetime, down from
+11,881,376. Exhaustion raises `IdSpaceExhausted` without recycling IDs. Forks
+share the stream and mappings; independent caches can assign the same ID to
+different documents, so keep references scoped to their cache family. Check
+model-provided IDs with `cache.contains_model_facing_id` before using them.
+
+This default prioritizes reference accuracy based on observed model behavior.
+Token cost depends on the tokenizer: the repository's historical measurements
+were about six tokens per numeric ID on Qwen and two on o200k/cl100k, versus
+about three for five-letter IDs. Downstream letter-only validators, prompt
+examples, and seeded snapshots need updating; the same seed now produces a
+different default sequence. Explicit custom `IdStream(alphabet=..., length=...)`
+settings continue to work, including the old lowercase alphabet with length 5.
+
 ## Character ranges
 
 `DocumentCache(range_mode="lenient")` is the default. A partially overlapping
